@@ -30,7 +30,7 @@ on:
       - "**/.prettierignore"
 
 env:
-  repo_owner: "openpanel-dev"
+  repo_owner: "hops-ops"
 
 jobs:
   lint-and-test:

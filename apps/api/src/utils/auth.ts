@@ -409,8 +409,8 @@ function synthesizeAdminClient(
     type: ClientType.root,
     organizationId,
     projectId: null,
-    cors: null,
     secret: null,
+    ignoreCorsAndSecret: false,
     createdAt: new Date(),
     updatedAt: new Date(),
     // Project relation isn't used by /manage routes (root clients

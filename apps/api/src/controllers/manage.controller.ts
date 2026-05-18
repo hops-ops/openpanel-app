@@ -278,16 +278,23 @@ export async function getOrganization(
   request: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
+  // Same-org scoping. JWT-auth callers and root-Client callers are both
+  // bound to exactly one organizationId; cross-org reads aren't
+  // supported until a platform-admin scope is added (see comment block
+  // at the top of this Organizations section).
+  //
+  // BUG NOTE (regression test below): an earlier shape of this handler
+  // built the `where` clause via an object spread that overrode the
+  // URL-param `id` with `client.organizationId`, so GET
+  // /manage/organizations/<any-other-id> silently returned the caller's
+  // own Organization. That made the TF / Crossplane providers see drift
+  // and "reconcile" by renaming whichever Org the caller was anchored
+  // to. Now we compare-and-404 explicitly.
+  if (request.params.id !== request.client!.organizationId) {
+    throw new HttpError('Organization not found', { status: 404 });
+  }
   const org = await db.organization.findFirst({
-    where: {
-      id: request.params.id,
-      // Same-org scoping. JWT-auth callers can only `get` the org
-      // their claim is bound to; cross-org reads require additional
-      // claim plumbing we haven't designed yet.
-      ...(request.client!.organizationId
-        ? { id: request.client!.organizationId }
-        : {}),
-    },
+    where: { id: request.params.id },
   });
   if (!org) {
     throw new HttpError('Organization not found', { status: 404 });
@@ -299,12 +306,34 @@ export async function createOrganization(
   request: FastifyRequest<{ Body: z.infer<typeof zCreateOrganization> }>,
   reply: FastifyReply
 ) {
-  const { name, timezone } = request.body;
+  // Creating new Organizations is a platform-admin operation. Both the
+  // root-Client and OIDC-JWT auth modes anchor the synthesized client
+  // to a single organizationId — a successful create from such a
+  // caller would produce an Organization that the same caller can't
+  // subsequently read (GET enforces same-org scoping). That broken
+  // partial state is what bit Crossplane / TF reconciles: the MR's
+  // external-name pointed to a new Org but the next reconcile's READ
+  // returned the caller's own Org, causing accidental UPDATE/DELETE
+  // against the wrong row.
+  //
+  // Until a true platform-admin scope is wired (e.g. an OIDC role +
+  // multi-org JWT, or a reserved organizationId like "platform"),
+  // refuse Create from any caller that's anchored to a regular Org —
+  // operators who need to bootstrap new Orgs must seed them directly
+  // in the DB (see the openpanel-chart `templates/bootstrap.yaml`
+  // hook) or via a platform-admin JWT once available.
+  throw new HttpError(
+    'Organization Create is restricted until platform-admin auth is implemented. ' +
+      'For bootstrap, seed Organizations directly (see openpanel-chart bootstrap Job). ' +
+      'Tenant Organization provisioning will route through TenantStack once platform-admin scope lands.',
+    { status: 403 },
+  );
 
-  // No createdByUserId on this code path — Organization.createdByUserId
-  // is nullable and the relation is SetNull on delete. JWT-auth admins
-  // and root Clients are not Users; we leave the field unset so the
-  // newly-created Org has no human owner.
+  // Unreachable until the gate above is replaced with a real
+  // platform-admin check. Left here intentionally to make the
+  // intended Create path obvious to future maintainers.
+  // eslint-disable-next-line no-unreachable
+  const { name, timezone } = request.body;
   const org = await db.organization.create({
     data: {
       id: await getId('organization', name),
@@ -313,7 +342,6 @@ export async function createOrganization(
       onboarding: 'completed',
     },
   });
-
   reply.send({ data: org });
 }
 
@@ -324,6 +352,10 @@ export async function updateOrganization(
   }>,
   reply: FastifyReply
 ) {
+  // Same-org scoping (see getOrganization for the original bug).
+  if (request.params.id !== request.client!.organizationId) {
+    throw new HttpError('Organization not found', { status: 404 });
+  }
   const existing = await db.organization.findFirst({
     where: { id: request.params.id },
   });
@@ -348,6 +380,13 @@ export async function deleteOrganization(
   request: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
+  // Same-org scoping (see getOrganization for the original bug).
+  // Deleting an Org cascades to projects/clients/members; an
+  // unscoped delete here was the trigger that cleared the bootstrap
+  // root Client during Crossplane MR cleanup.
+  if (request.params.id !== request.client!.organizationId) {
+    throw new HttpError('Organization not found', { status: 404 });
+  }
   const existing = await db.organization.findFirst({
     where: { id: request.params.id },
   });

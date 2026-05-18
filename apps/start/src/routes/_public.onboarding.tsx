@@ -6,6 +6,7 @@ import { Or } from '@/components/auth/or';
 import { SignInGithub } from '@/components/auth/sign-in-github';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
 import { SignInOidc } from '@/components/auth/sign-in-oidc';
+import { SignInOrgSso } from '@/components/auth/sign-in-org-sso';
 import { SignUpEmailForm } from '@/components/auth/sign-up-email-form';
 import FullPageLoadingState from '@/components/full-page-loading-state';
 import { useTRPC } from '@/integrations/trpc/react';
@@ -109,6 +110,7 @@ function Component() {
 
       <div className="space-y-6">
         <SignInOidc inviteId={inviteId} type="sign-up" />
+        <SignInOrgSso inviteId={inviteId} type="sign-up" />
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <SignInGithub inviteId={inviteId} type="sign-up" />
           <SignInGoogle inviteId={inviteId} type="sign-up" />

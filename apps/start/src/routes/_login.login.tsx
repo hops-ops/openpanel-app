@@ -6,6 +6,7 @@ import { SignInEmailForm } from '@/components/auth/sign-in-email-form';
 import { SignInGithub } from '@/components/auth/sign-in-github';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
 import { SignInOidc } from '@/components/auth/sign-in-oidc';
+import { SignInOrgSso } from '@/components/auth/sign-in-org-sso';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useCookieStore } from '@/hooks/use-cookie-store';
 import { createTitle, PAGE_TITLES } from '@/utils/title';
@@ -79,6 +80,7 @@ function LoginPage() {
           isLastUsed={lastProvider === 'oidc'}
           type="sign-in"
         />
+        <SignInOrgSso inviteId={inviteId} type="sign-in" />
         <SignInGoogle
           inviteId={inviteId}
           isLastUsed={lastProvider === 'google'}

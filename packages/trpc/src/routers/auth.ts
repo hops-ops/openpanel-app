@@ -14,7 +14,10 @@ import {
   hashPassword,
   hashRecoveryCodes,
   invalidateSession,
+  decryptSsoSecret,
   isOidcEnabled,
+  isSsoRequiredForUser,
+  lookupOrgSsoByEmailDomain,
   oidc,
   OIDC_AUTHORIZATION_ENDPOINT,
   setLastAuthProviderCookie,
@@ -54,7 +57,12 @@ import {
 const TWO_FACTOR_COOKIE = '2fa_challenge';
 const TWO_FACTOR_CHALLENGE_TTL_SECONDS = 5 * 60;
 
-const zProvider = z.enum(['email', 'google', 'github', 'oidc']);
+// `org-sso` resolves to a per-Organization OIDC config (see
+// OrganizationSsoConfig). The signInOAuth mutation requires an
+// `email` field when provider='org-sso' so the server can look up the
+// right Org by email domain. See spec
+// specs/openpanel-sso-instance-and-per-org.
+const zProvider = z.enum(['email', 'google', 'github', 'oidc', 'org-sso']);
 
 async function getIsRegistrationAllowed(inviteId?: string | null) {
   // ALLOW_REGISTRATION is always undefined in cloud
@@ -96,7 +104,16 @@ export const authRouter = createTRPCRouter({
     }
   }),
   signInOAuth: publicProcedure
-    .input(z.object({ provider: zProvider, inviteId: z.string().nullish() }))
+    .input(
+      z.object({
+        provider: zProvider,
+        inviteId: z.string().nullish(),
+        // Required when provider='org-sso'. Used server-side to
+        // look up the Org by `enforcedForDomains`; never echoed back
+        // to clients in errors.
+        email: z.string().email().optional(),
+      }),
+    )
     .mutation(async ({ input, ctx }) => {
       const isRegistrationAllowed = await getIsRegistrationAllowed(
         input.inviteId
@@ -157,6 +174,59 @@ export const authRouter = createTRPCRouter({
 
         return {
           type: 'oidc',
+          url: url.toString(),
+        };
+      }
+
+      if (provider === 'org-sso') {
+        if (!input.email) {
+          throw TRPCAccessError(
+            "Email is required for org-sso sign-in so we can route to your organization's IdP",
+          );
+        }
+        const lookup = await lookupOrgSsoByEmailDomain(input.email);
+        if (!lookup || !lookup.config.oidcClientId || !lookup.config.oidcClientSecretEncrypted || !lookup.config.oidcAuthorizationEndpoint) {
+          // Don't leak which domains do/don't have SSO configured.
+          throw TRPCAccessError(
+            'No SSO configured for this email. Use another sign-in method.',
+          );
+        }
+
+        const clientSecret = decryptSsoSecret(
+          Buffer.from(lookup.config.oidcClientSecretEncrypted),
+        );
+        const orgClient = new Arctic.OAuth2Client(
+          lookup.config.oidcClientId,
+          clientSecret,
+          // `redirectUri` is required by the Arctic constructor signature
+          // but only used by the matching `validateAuthorizationCode`
+          // call inside the callback — we re-instantiate there with
+          // the configured URI. Pass a placeholder here.
+          'about:blank',
+        );
+        const state = Arctic.generateState();
+        const codeVerifier = Arctic.generateCodeVerifier();
+        const url = orgClient.createAuthorizationURLWithPKCE(
+          lookup.config.oidcAuthorizationEndpoint,
+          state,
+          Arctic.CodeChallengeMethod.S256,
+          codeVerifier,
+          ['openid', 'profile', 'email'],
+        );
+
+        // Same `oidc_*` cookie names as the instance-level flow so the
+        // callback handler doesn't need a parallel set. The cookie
+        // values are scoped per browser session anyway.
+        ctx.setCookie('oidc_oauth_state', state, { maxAge: 60 * 10 });
+        ctx.setCookie('oidc_code_verifier', codeVerifier, { maxAge: 60 * 10 });
+        // The discriminator: the callback uses this to know it's an
+        // org-sso flow and which row to load (rather than env-driven).
+        ctx.setCookie('oidc_sso_config_id', lookup.config.id, {
+          maxAge: 60 * 10,
+        });
+
+        return {
+          type: 'org-sso',
           url: url.toString(),
         };
       }
@@ -249,6 +319,18 @@ export const authRouter = createTRPCRouter({
 
       if (!user) {
         throw TRPCNotFoundError('User does not exists');
+      }
+
+      // Block email/password sign-in for users whose Organization
+      // mandates SSO. The dashboard catches this code and renders a
+      // "your organization requires SSO" page that kicks off the
+      // org-sso flow against the same email. We return the matching
+      // config's id+displayName so the UI can label the button.
+      const ssoRequired = await isSsoRequiredForUser(user.id);
+      if (ssoRequired) {
+        throw TRPCAccessError(
+          `Sign in via ${ssoRequired.displayName} — your organization requires single sign-on.`,
+        );
       }
 
       if (provider === 'email') {

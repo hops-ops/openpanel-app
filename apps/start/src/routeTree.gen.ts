@@ -40,6 +40,7 @@ import { Route as AppOrganizationIdProjectIdRouteImport } from './routes/_app.$o
 import { Route as AppOrganizationIdProjectIdIndexRouteImport } from './routes/_app.$organizationId.$projectId.index'
 import { Route as StepsOnboardingProjectIdVerifyRouteImport } from './routes/_steps.onboarding.$projectId.verify'
 import { Route as StepsOnboardingProjectIdConnectRouteImport } from './routes/_steps.onboarding.$projectId.connect'
+import { Route as AppOrganizationIdSettingsSsoRouteImport } from './routes/_app.$organizationId.settings.sso'
 import { Route as AppOrganizationIdMembersTabsRouteImport } from './routes/_app.$organizationId.members._tabs'
 import { Route as AppOrganizationIdIntegrationsTabsRouteImport } from './routes/_app.$organizationId.integrations._tabs'
 import { Route as AppOrganizationIdAccountTabsRouteImport } from './routes/_app.$organizationId.account._tabs'
@@ -321,6 +322,12 @@ const StepsOnboardingProjectIdConnectRoute =
     id: '/onboarding/$projectId/connect',
     path: '/onboarding/$projectId/connect',
     getParentRoute: () => StepsRoute,
+  } as any)
+const AppOrganizationIdSettingsSsoRoute =
+  AppOrganizationIdSettingsSsoRouteImport.update({
+    id: '/sso',
+    path: '/sso',
+    getParentRoute: () => AppOrganizationIdSettingsRoute,
   } as any)
 const AppOrganizationIdMembersTabsRoute =
   AppOrganizationIdMembersTabsRouteImport.update({
@@ -714,7 +721,7 @@ export interface FileRoutesByFullPath {
   '/widget/test': typeof WidgetTestRoute
   '/$organizationId/$projectId': typeof AppOrganizationIdProjectIdRouteWithChildren
   '/$organizationId/billing': typeof AppOrganizationIdBillingRoute
-  '/$organizationId/settings': typeof AppOrganizationIdSettingsRoute
+  '/$organizationId/settings': typeof AppOrganizationIdSettingsRouteWithChildren
   '/onboarding/project': typeof StepsOnboardingProjectRoute
   '/share/dashboard/$shareId': typeof ShareDashboardShareIdRoute
   '/share/overview/$shareId': typeof ShareOverviewShareIdRoute
@@ -733,6 +740,7 @@ export interface FileRoutesByFullPath {
   '/$organizationId/account': typeof AppOrganizationIdAccountTabsRouteWithChildren
   '/$organizationId/integrations': typeof AppOrganizationIdIntegrationsTabsRouteWithChildren
   '/$organizationId/members': typeof AppOrganizationIdMembersTabsRouteWithChildren
+  '/$organizationId/settings/sso': typeof AppOrganizationIdSettingsSsoRoute
   '/onboarding/$projectId/connect': typeof StepsOnboardingProjectIdConnectRoute
   '/onboarding/$projectId/verify': typeof StepsOnboardingProjectIdVerifyRoute
   '/$organizationId/$projectId/': typeof AppOrganizationIdProjectIdIndexRoute
@@ -800,7 +808,7 @@ export interface FileRoutesByTo {
   '/widget/realtime': typeof WidgetRealtimeRoute
   '/widget/test': typeof WidgetTestRoute
   '/$organizationId/billing': typeof AppOrganizationIdBillingRoute
-  '/$organizationId/settings': typeof AppOrganizationIdSettingsRoute
+  '/$organizationId/settings': typeof AppOrganizationIdSettingsRouteWithChildren
   '/onboarding/project': typeof StepsOnboardingProjectRoute
   '/share/dashboard/$shareId': typeof ShareDashboardShareIdRoute
   '/share/overview/$shareId': typeof ShareOverviewShareIdRoute
@@ -819,6 +827,7 @@ export interface FileRoutesByTo {
   '/$organizationId/account': typeof AppOrganizationIdAccountTabsIndexRoute
   '/$organizationId/integrations': typeof AppOrganizationIdIntegrationsTabsIndexRoute
   '/$organizationId/members': typeof AppOrganizationIdMembersTabsIndexRoute
+  '/$organizationId/settings/sso': typeof AppOrganizationIdSettingsSsoRoute
   '/onboarding/$projectId/connect': typeof StepsOnboardingProjectIdConnectRoute
   '/onboarding/$projectId/verify': typeof StepsOnboardingProjectIdVerifyRoute
   '/$organizationId/$projectId': typeof AppOrganizationIdProjectIdIndexRoute
@@ -883,7 +892,7 @@ export interface FileRoutesById {
   '/widget/test': typeof WidgetTestRoute
   '/_app/$organizationId/$projectId': typeof AppOrganizationIdProjectIdRouteWithChildren
   '/_app/$organizationId/billing': typeof AppOrganizationIdBillingRoute
-  '/_app/$organizationId/settings': typeof AppOrganizationIdSettingsRoute
+  '/_app/$organizationId/settings': typeof AppOrganizationIdSettingsRouteWithChildren
   '/_steps/onboarding/project': typeof StepsOnboardingProjectRoute
   '/share/dashboard/$shareId': typeof ShareDashboardShareIdRoute
   '/share/overview/$shareId': typeof ShareOverviewShareIdRoute
@@ -905,6 +914,7 @@ export interface FileRoutesById {
   '/_app/$organizationId/integrations/_tabs': typeof AppOrganizationIdIntegrationsTabsRouteWithChildren
   '/_app/$organizationId/members': typeof AppOrganizationIdMembersRouteWithChildren
   '/_app/$organizationId/members/_tabs': typeof AppOrganizationIdMembersTabsRouteWithChildren
+  '/_app/$organizationId/settings/sso': typeof AppOrganizationIdSettingsSsoRoute
   '/_steps/onboarding/$projectId/connect': typeof StepsOnboardingProjectIdConnectRoute
   '/_steps/onboarding/$projectId/verify': typeof StepsOnboardingProjectIdVerifyRoute
   '/_app/$organizationId/$projectId/': typeof AppOrganizationIdProjectIdIndexRoute
@@ -1002,6 +1012,7 @@ export interface FileRouteTypes {
     | '/$organizationId/account'
     | '/$organizationId/integrations'
     | '/$organizationId/members'
+    | '/$organizationId/settings/sso'
     | '/onboarding/$projectId/connect'
     | '/onboarding/$projectId/verify'
     | '/$organizationId/$projectId/'
@@ -1088,6 +1099,7 @@ export interface FileRouteTypes {
     | '/$organizationId/account'
     | '/$organizationId/integrations'
     | '/$organizationId/members'
+    | '/$organizationId/settings/sso'
     | '/onboarding/$projectId/connect'
     | '/onboarding/$projectId/verify'
     | '/$organizationId/$projectId'
@@ -1173,6 +1185,7 @@ export interface FileRouteTypes {
     | '/_app/$organizationId/integrations/_tabs'
     | '/_app/$organizationId/members'
     | '/_app/$organizationId/members/_tabs'
+    | '/_app/$organizationId/settings/sso'
     | '/_steps/onboarding/$projectId/connect'
     | '/_steps/onboarding/$projectId/verify'
     | '/_app/$organizationId/$projectId/'
@@ -1504,6 +1517,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/onboarding/$projectId/connect'
       preLoaderRoute: typeof StepsOnboardingProjectIdConnectRouteImport
       parentRoute: typeof StepsRoute
+    }
+    '/_app/$organizationId/settings/sso': {
+      id: '/_app/$organizationId/settings/sso'
+      path: '/sso'
+      fullPath: '/$organizationId/settings/sso'
+      preLoaderRoute: typeof AppOrganizationIdSettingsSsoRouteImport
+      parentRoute: typeof AppOrganizationIdSettingsRoute
     }
     '/_app/$organizationId/members/_tabs': {
       id: '/_app/$organizationId/members/_tabs'
@@ -2304,6 +2324,20 @@ const AppOrganizationIdProjectIdRouteWithChildren =
     AppOrganizationIdProjectIdRouteChildren,
   )
 
+interface AppOrganizationIdSettingsRouteChildren {
+  AppOrganizationIdSettingsSsoRoute: typeof AppOrganizationIdSettingsSsoRoute
+}
+
+const AppOrganizationIdSettingsRouteChildren: AppOrganizationIdSettingsRouteChildren =
+  {
+    AppOrganizationIdSettingsSsoRoute: AppOrganizationIdSettingsSsoRoute,
+  }
+
+const AppOrganizationIdSettingsRouteWithChildren =
+  AppOrganizationIdSettingsRoute._addFileChildren(
+    AppOrganizationIdSettingsRouteChildren,
+  )
+
 interface AppOrganizationIdAccountTabsRouteChildren {
   AppOrganizationIdAccountTabsEmailPreferencesRoute: typeof AppOrganizationIdAccountTabsEmailPreferencesRoute
   AppOrganizationIdAccountTabsTwoFactorRoute: typeof AppOrganizationIdAccountTabsTwoFactorRoute
@@ -2415,7 +2449,7 @@ const AppOrganizationIdMembersRouteWithChildren =
 interface AppOrganizationIdRouteChildren {
   AppOrganizationIdProjectIdRoute: typeof AppOrganizationIdProjectIdRouteWithChildren
   AppOrganizationIdBillingRoute: typeof AppOrganizationIdBillingRoute
-  AppOrganizationIdSettingsRoute: typeof AppOrganizationIdSettingsRoute
+  AppOrganizationIdSettingsRoute: typeof AppOrganizationIdSettingsRouteWithChildren
   AppOrganizationIdIndexRoute: typeof AppOrganizationIdIndexRoute
   AppOrganizationIdAccountRoute: typeof AppOrganizationIdAccountRouteWithChildren
   AppOrganizationIdIntegrationsRoute: typeof AppOrganizationIdIntegrationsRouteWithChildren
@@ -2425,7 +2459,7 @@ interface AppOrganizationIdRouteChildren {
 const AppOrganizationIdRouteChildren: AppOrganizationIdRouteChildren = {
   AppOrganizationIdProjectIdRoute: AppOrganizationIdProjectIdRouteWithChildren,
   AppOrganizationIdBillingRoute: AppOrganizationIdBillingRoute,
-  AppOrganizationIdSettingsRoute: AppOrganizationIdSettingsRoute,
+  AppOrganizationIdSettingsRoute: AppOrganizationIdSettingsRouteWithChildren,
   AppOrganizationIdIndexRoute: AppOrganizationIdIndexRoute,
   AppOrganizationIdAccountRoute: AppOrganizationIdAccountRouteWithChildren,
   AppOrganizationIdIntegrationsRoute:
@@ -2507,12 +2541,3 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
-declare module '@tanstack/react-start' {
-  interface Register {
-    ssr: true
-    router: Awaited<ReturnType<typeof getRouter>>
-  }
-}

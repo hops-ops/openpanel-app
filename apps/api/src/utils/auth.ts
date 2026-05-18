@@ -298,6 +298,14 @@ export async function validateManageRequest(
 // ---------------------------------------------------------------------
 
 const DEFAULT_REQUIRED_ROLE = 'openpanel:admin';
+const DEFAULT_PLATFORM_ADMIN_ROLE = 'openpanel:platform-admin';
+
+// Sentinel `organizationId` the manage controllers recognize as
+// platform-admin. Kept in lock-step with `PLATFORM_ADMIN_ORG_ID` in
+// `controllers/manage.controller.ts`. JWTs that carry the
+// `platformAdminRole` get synthesized with this value so the
+// downstream same-org filters short-circuit.
+const PLATFORM_ADMIN_ORG_ID = 'platform-admin';
 
 // Cache the resolved JWKS endpoint between requests so we hit the
 // discovery doc once per process start.
@@ -313,6 +321,12 @@ interface AdminOidcConfig {
   issuer: string;
   audience: string | undefined;
   requiredRole: string;
+  // Optional role that, when present in the JWT, elevates the caller
+  // to the platform-admin sentinel scope (multi-tenant Org CRUD).
+  // Default is `openpanel:platform-admin`. Operators who want all
+  // admin JWTs to be platform-admins can set this to the same value
+  // as `requiredRole`.
+  platformAdminRole: string;
   orgClaim: string;
 }
 
@@ -325,6 +339,8 @@ function loadAdminOidcConfig(): AdminOidcConfig | undefined {
     issuer: issuer.replace(/\/$/, ''),
     audience: process.env.ADMIN_OIDC_AUDIENCE,
     requiredRole: process.env.ADMIN_OIDC_REQUIRED_ROLE ?? DEFAULT_REQUIRED_ROLE,
+    platformAdminRole:
+      process.env.ADMIN_OIDC_PLATFORM_ADMIN_ROLE ?? DEFAULT_PLATFORM_ADMIN_ROLE,
     // Zitadel emits the user's home Org under
     // `urn:zitadel:iam:user:resourceowner:id`; Keycloak / generic IdPs
     // typically use a custom claim such as `organization_id`. Operators
@@ -441,19 +457,34 @@ export async function validateAdminJwtRequest(
   }
 
   const { payload } = await jwtVerify(token, jwks, verifyOptions);
+  const claims = payload as Record<string, unknown>;
+  const subject = typeof payload.sub === 'string' ? payload.sub : 'unknown';
 
-  if (!claimHasRole(payload as Record<string, unknown>, config.requiredRole)) {
+  if (!claimHasRole(claims, config.requiredRole)) {
     throw new Error(`Admin OIDC: token lacks required role ${config.requiredRole}`);
   }
 
-  const orgId = (payload as Record<string, unknown>)[config.orgClaim];
+  // Platform-admin elevation: if the token carries the configured
+  // platform-admin role, synthesize the request with the sentinel
+  // `organizationId='platform-admin'`. The manage controllers'
+  // `isPlatformAdmin` check then bypasses tenant scoping on Org CRUD.
+  //
+  // We intentionally ignore the resource-owner claim in this branch
+  // because a platform-admin ServiceUser may live in any Zitadel
+  // Org — the role grant, not the home Org, is what authorizes
+  // cross-tenant management.
+  if (claimHasRole(claims, config.platformAdminRole)) {
+    return synthesizeAdminClient(PLATFORM_ADMIN_ORG_ID, subject);
+  }
+
+  // Tenant-scoped admin: bind the synthesized client to the org
+  // claim. Same-org filters in the controllers apply.
+  const orgId = claims[config.orgClaim];
   if (typeof orgId !== 'string' || orgId.length === 0) {
     throw new Error(
       `Admin OIDC: token missing organization claim "${config.orgClaim}"`,
     );
   }
-  const subject = typeof payload.sub === 'string' ? payload.sub : 'unknown';
-
   return synthesizeAdminClient(orgId, subject);
 }
 

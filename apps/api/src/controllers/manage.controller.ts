@@ -11,6 +11,25 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { HttpError } from '@/utils/errors';
 
+// Reserved Organization ID for the platform-admin root client.
+//
+// The openpanel-chart bootstrap Job INSERTs an Organization with this
+// id and a root Client anchored to it. The pair acts as a sentinel for
+// "this caller is the platform admin": Org handlers below detect the
+// id and skip same-org filtering so platform admins can manage every
+// tenant Organization.
+//
+// `createOrganization` refuses to mint a new Org whose slugified id
+// would equal this constant, so a tenant named "Platform Admin"
+// (which would slug to `platform-admin`) can't accidentally inherit
+// god-mode. The bootstrap Job seeds the row directly via SQL and is
+// not subject to that reservation.
+const PLATFORM_ADMIN_ORG_ID = 'platform-admin';
+
+function isPlatformAdmin(client: { organizationId: string }): boolean {
+  return client.organizationId === PLATFORM_ADMIN_ORG_ID;
+}
+
 // Validation schemas (exported for use in router)
 export const zCreateOrganization = z.object({
   name: z.string().min(1),
@@ -264,10 +283,17 @@ export async function listOrganizations(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  // For now, callers see only the org their auth scope is bound to.
-  // A platform-admin JWT scoped at the instance level would warrant
-  // returning every Organization, but that requires a richer claim
-  // model than v1 ships with.
+  // Platform-admin sees every Organization on this OpenPanel install
+  // (drives the TenantStack composition: discover which tenant Orgs
+  // already exist so new tenants don't collide with existing slugs).
+  // Tenant-scoped callers see only the org they're anchored to.
+  if (isPlatformAdmin(request.client!)) {
+    const orgs = await db.organization.findMany({
+      orderBy: { name: 'asc' },
+    });
+    reply.send({ data: orgs });
+    return;
+  }
   const org = await db.organization.findFirst({
     where: { id: request.client!.organizationId },
   });
@@ -278,19 +304,21 @@ export async function getOrganization(
   request: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  // Same-org scoping. JWT-auth callers and root-Client callers are both
-  // bound to exactly one organizationId; cross-org reads aren't
-  // supported until a platform-admin scope is added (see comment block
-  // at the top of this Organizations section).
+  // Tenant-scoped callers can only GET the Org their root Client (or
+  // synthesized JWT admin client) is anchored to; platform-admin
+  // bypasses that filter and can fetch any Org by id.
   //
-  // BUG NOTE (regression test below): an earlier shape of this handler
-  // built the `where` clause via an object spread that overrode the
-  // URL-param `id` with `client.organizationId`, so GET
-  // /manage/organizations/<any-other-id> silently returned the caller's
-  // own Organization. That made the TF / Crossplane providers see drift
-  // and "reconcile" by renaming whichever Org the caller was anchored
-  // to. Now we compare-and-404 explicitly.
-  if (request.params.id !== request.client!.organizationId) {
+  // BUG NOTE: an earlier shape of this handler built the `where`
+  // clause via an object spread that overrode the URL-param `id`
+  // with `client.organizationId`, so GET /manage/organizations/<any-id>
+  // silently returned the caller's own Organization. That made TF /
+  // Crossplane reconciles see drift and "reconcile" by renaming
+  // whichever Org the caller was anchored to. The explicit
+  // compare-and-404 below avoids that whole class of mistake.
+  if (
+    !isPlatformAdmin(request.client!) &&
+    request.params.id !== request.client!.organizationId
+  ) {
     throw new HttpError('Organization not found', { status: 404 });
   }
   const org = await db.organization.findFirst({
@@ -306,37 +334,37 @@ export async function createOrganization(
   request: FastifyRequest<{ Body: z.infer<typeof zCreateOrganization> }>,
   reply: FastifyReply
 ) {
-  // Creating new Organizations is a platform-admin operation. Both the
-  // root-Client and OIDC-JWT auth modes anchor the synthesized client
-  // to a single organizationId — a successful create from such a
-  // caller would produce an Organization that the same caller can't
-  // subsequently read (GET enforces same-org scoping). That broken
-  // partial state is what bit Crossplane / TF reconciles: the MR's
-  // external-name pointed to a new Org but the next reconcile's READ
-  // returned the caller's own Org, causing accidental UPDATE/DELETE
-  // against the wrong row.
-  //
-  // Until a true platform-admin scope is wired (e.g. an OIDC role +
-  // multi-org JWT, or a reserved organizationId like "platform"),
-  // refuse Create from any caller that's anchored to a regular Org —
-  // operators who need to bootstrap new Orgs must seed them directly
-  // in the DB (see the openpanel-chart `templates/bootstrap.yaml`
-  // hook) or via a platform-admin JWT once available.
-  throw new HttpError(
-    'Organization Create is restricted until platform-admin auth is implemented. ' +
-      'For bootstrap, seed Organizations directly (see openpanel-chart bootstrap Job). ' +
-      'Tenant Organization provisioning will route through TenantStack once platform-admin scope lands.',
-    { status: 403 },
-  );
+  // Only platform-admin can mint new Organizations. A tenant-scoped
+  // caller's auth is anchored to one org; a successful Create from
+  // such a caller would produce an Org the same caller can't READ
+  // back (membership tracking would need to follow), which is the
+  // exact mode that caused Crossplane / TF reconciles to silently
+  // rename and then cascade-delete the wrong Org.
+  if (!isPlatformAdmin(request.client!)) {
+    throw new HttpError(
+      'Only the platform-admin client can create Organizations. ' +
+        'Tenant-scoped callers cannot mint sibling Orgs.',
+      { status: 403 },
+    );
+  }
 
-  // Unreachable until the gate above is replaced with a real
-  // platform-admin check. Left here intentionally to make the
-  // intended Create path obvious to future maintainers.
-  // eslint-disable-next-line no-unreachable
   const { name, timezone } = request.body;
+  const id = await getId('organization', name);
+
+  // Reserve the platform-admin sentinel id. The chart bootstrap Job
+  // INSERTs that row directly via SQL; if a real tenant name happened
+  // to slug to the same value, that tenant would inherit god-mode on
+  // every subsequent request.
+  if (id === PLATFORM_ADMIN_ORG_ID) {
+    throw new HttpError(
+      `Organization id "${PLATFORM_ADMIN_ORG_ID}" is reserved for the platform-admin sentinel client. Pick a different name.`,
+      { status: 409 },
+    );
+  }
+
   const org = await db.organization.create({
     data: {
-      id: await getId('organization', name),
+      id,
       name,
       timezone: timezone ?? null,
       onboarding: 'completed',
@@ -352,8 +380,12 @@ export async function updateOrganization(
   }>,
   reply: FastifyReply
 ) {
-  // Same-org scoping (see getOrganization for the original bug).
-  if (request.params.id !== request.client!.organizationId) {
+  // Tenant-scoped callers can only update their own Org; platform-admin
+  // can update any (see getOrganization for the original bug).
+  if (
+    !isPlatformAdmin(request.client!) &&
+    request.params.id !== request.client!.organizationId
+  ) {
     throw new HttpError('Organization not found', { status: 404 });
   }
   const existing = await db.organization.findFirst({
@@ -380,12 +412,27 @@ export async function deleteOrganization(
   request: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  // Same-org scoping (see getOrganization for the original bug).
+  // Tenant-scoped callers can only delete their own Org; platform-admin
+  // can delete any (see getOrganization for the original bug).
   // Deleting an Org cascades to projects/clients/members; an
   // unscoped delete here was the trigger that cleared the bootstrap
   // root Client during Crossplane MR cleanup.
-  if (request.params.id !== request.client!.organizationId) {
+  if (
+    !isPlatformAdmin(request.client!) &&
+    request.params.id !== request.client!.organizationId
+  ) {
     throw new HttpError('Organization not found', { status: 404 });
+  }
+
+  // Refuse to delete the platform-admin Org — destroying it would
+  // cascade-delete the platform-admin root Client and lock the
+  // operator out of /manage entirely until the chart's bootstrap
+  // Job re-runs.
+  if (request.params.id === PLATFORM_ADMIN_ORG_ID) {
+    throw new HttpError(
+      `Organization "${PLATFORM_ADMIN_ORG_ID}" cannot be deleted (would cascade-delete the platform-admin client).`,
+      { status: 409 },
+    );
   }
   const existing = await db.organization.findFirst({
     where: { id: request.params.id },

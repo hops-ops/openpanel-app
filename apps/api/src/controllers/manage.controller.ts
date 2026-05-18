@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { stripTrailingSlash } from '@openpanel/common';
+import { slug, stripTrailingSlash } from '@openpanel/common';
 import { hashPassword } from '@openpanel/common/server';
 import {
   db,
@@ -349,18 +349,22 @@ export async function createOrganization(
   }
 
   const { name, timezone } = request.body;
-  const id = await getId('organization', name);
 
-  // Reserve the platform-admin sentinel id. The chart bootstrap Job
-  // INSERTs that row directly via SQL; if a real tenant name happened
-  // to slug to the same value, that tenant would inherit god-mode on
-  // every subsequent request.
-  if (id === PLATFORM_ADMIN_ORG_ID) {
+  // Reserve the platform-admin sentinel id. We slug the name BEFORE
+  // calling getId so a tenant named "Platform Admin" is rejected
+  // outright with a clear 409 — without this guard, getId silently
+  // appends a `-1459` suffix on collision and the operator gets a
+  // weirdly-named tenant Org instead of the explicit error they
+  // probably meant to see. The bootstrap Job INSERTs the sentinel
+  // row directly via SQL and is not subject to this gate.
+  if (slug(name) === PLATFORM_ADMIN_ORG_ID) {
     throw new HttpError(
-      `Organization id "${PLATFORM_ADMIN_ORG_ID}" is reserved for the platform-admin sentinel client. Pick a different name.`,
+      `Organization name slugifies to the reserved "${PLATFORM_ADMIN_ORG_ID}" sentinel id. Pick a different name.`,
       { status: 409 },
     );
   }
+
+  const id = await getId('organization', name);
 
   const org = await db.organization.create({
     data: {

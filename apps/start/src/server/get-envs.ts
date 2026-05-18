@@ -2,13 +2,12 @@ import { queryOptions } from '@tanstack/react-query';
 import { createServerFn } from '@tanstack/react-start';
 
 export const getServerEnvs = createServerFn().handler(() => {
-  const oidcConfigured = !!(
-    process.env.OIDC_CLIENT_ID &&
-    process.env.OIDC_CLIENT_SECRET &&
-    process.env.OIDC_REDIRECT_URI &&
-    process.env.OIDC_AUTHORIZATION_ENDPOINT &&
-    process.env.OIDC_TOKEN_ENDPOINT
-  );
+  // The dashboard only needs OIDC_CLIENT_ID to know whether to render
+  // the SSO sign-in button. The full validation (client secret +
+  // endpoints) lives on the api pod where the OAuth flow actually
+  // runs. This lets operators keep the OIDC secret confined to the
+  // api pod without losing the button.
+  const oidcConfigured = !!process.env.OIDC_CLIENT_ID;
 
   const envs = {
     apiUrl: String(process.env.API_URL || process.env.NEXT_PUBLIC_API_URL),

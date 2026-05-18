@@ -9,6 +9,7 @@ import type {
   ITrackHandlerPayload,
 } from '@openpanel/validation';
 import type { FastifyRequest, RawRequestDefaultExpression } from 'fastify';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { path } from 'ramda';
 
 const cleanDomain = (domain: string) =>
@@ -276,4 +277,263 @@ export async function validateManageRequest(
   }
 
   return client;
+}
+
+// ---------------------------------------------------------------------
+// Admin-auth via OIDC JWT (opt-in)
+//
+// When `ADMIN_OIDC_ISSUER` is configured, /manage routes accept an
+// `Authorization: Bearer <jwt>` header in addition to the existing
+// `openpanel-client-id` / `openpanel-client-secret` Client-pair auth.
+//
+// The JWT is validated against the issuer's JWKS (discovered via the
+// standard `/.well-known/openid-configuration` document). The token
+// must carry the configured audience and a role claim that matches
+// `ADMIN_OIDC_REQUIRED_ROLE` (defaults to `openpanel:admin`).
+//
+// Returns a synthesized Client-shaped record so the manage routes can
+// scope authorization by `organizationId` without branching on auth
+// source. `type` is `root` so existing controllers honor the
+// permission model unchanged.
+// ---------------------------------------------------------------------
+
+const DEFAULT_REQUIRED_ROLE = 'openpanel:admin';
+const DEFAULT_PLATFORM_ADMIN_ROLE = 'openpanel:platform-admin';
+
+// Sentinel `organizationId` the manage controllers recognize as
+// platform-admin. Kept in lock-step with `PLATFORM_ADMIN_ORG_ID` in
+// `controllers/manage.controller.ts`. JWTs that carry the
+// `platformAdminRole` get synthesized with this value so the
+// downstream same-org filters short-circuit.
+const PLATFORM_ADMIN_ORG_ID = 'platform-admin';
+
+// Cache the resolved JWKS endpoint between requests so we hit the
+// discovery doc once per process start.
+let jwksCache:
+  | {
+      issuer: string;
+      audience: string | undefined;
+      jwks: ReturnType<typeof createRemoteJWKSet>;
+    }
+  | undefined;
+
+interface AdminOidcConfig {
+  issuer: string;
+  audience: string | undefined;
+  requiredRole: string;
+  // Two independent paths to platform-admin elevation. Either / or
+  // both can be configured; presence of either in the JWT elevates.
+  //
+  // platformAdminRole: works with IdPs that include role assertions in
+  //   the access token (Keycloak, Auth0 with claims, etc.).
+  //
+  // platformAdminAudience: works with IdPs whose client_credentials
+  //   JWTs don't include role claims — notably Zitadel, where roles
+  //   are accessible only via the introspection endpoint and the
+  //   audience claim is the cleanest server-side signal. Set this to
+  //   the Zitadel project ID that hosts your `openpanel:platform-admin`
+  //   role; restrict MachineUser membership of that project to
+  //   platform-admins only.
+  platformAdminRole: string;
+  platformAdminAudience: string | undefined;
+  orgClaim: string;
+}
+
+function loadAdminOidcConfig(): AdminOidcConfig | undefined {
+  const issuer = process.env.ADMIN_OIDC_ISSUER;
+  if (!issuer) {
+    return undefined;
+  }
+  return {
+    issuer: issuer.replace(/\/$/, ''),
+    audience: process.env.ADMIN_OIDC_AUDIENCE,
+    requiredRole: process.env.ADMIN_OIDC_REQUIRED_ROLE ?? DEFAULT_REQUIRED_ROLE,
+    platformAdminRole:
+      process.env.ADMIN_OIDC_PLATFORM_ADMIN_ROLE ?? DEFAULT_PLATFORM_ADMIN_ROLE,
+    platformAdminAudience: process.env.ADMIN_OIDC_PLATFORM_ADMIN_AUDIENCE,
+    // Zitadel emits the user's home Org under
+    // `urn:zitadel:iam:user:resourceowner:id`; Keycloak / generic IdPs
+    // typically use a custom claim such as `organization_id`. Operators
+    // can override here.
+    orgClaim:
+      process.env.ADMIN_OIDC_ORG_CLAIM ??
+      'urn:zitadel:iam:user:resourceowner:id',
+  };
+}
+
+// Returns true if the token's `aud` claim contains the configured
+// platform-admin audience. The `aud` claim may be either a string or
+// an array of strings per RFC 7519 §4.1.3.
+function audienceHasPlatformAdmin(
+  claims: Record<string, unknown>,
+  expected: string,
+): boolean {
+  const aud = claims.aud;
+  if (typeof aud === 'string') return aud === expected;
+  if (Array.isArray(aud)) return aud.includes(expected);
+  return false;
+}
+
+export function isAdminJwtAuthEnabled(): boolean {
+  return loadAdminOidcConfig() !== undefined;
+}
+
+async function getJwks(config: AdminOidcConfig) {
+  if (
+    jwksCache &&
+    jwksCache.issuer === config.issuer &&
+    jwksCache.audience === config.audience
+  ) {
+    return jwksCache.jwks;
+  }
+  const discoveryUrl = new URL(
+    '/.well-known/openid-configuration',
+    config.issuer,
+  );
+  const discoveryRes = await fetch(discoveryUrl);
+  if (!discoveryRes.ok) {
+    throw new Error(
+      `Admin OIDC: discovery fetch failed (${discoveryRes.status}) for ${discoveryUrl}`,
+    );
+  }
+  const discovery = (await discoveryRes.json()) as { jwks_uri?: string };
+  if (!discovery.jwks_uri) {
+    throw new Error('Admin OIDC: discovery doc missing jwks_uri');
+  }
+  const jwks = createRemoteJWKSet(new URL(discovery.jwks_uri), {
+    cooldownDuration: 60_000,
+    cacheMaxAge: 10 * 60_000,
+  });
+  jwksCache = { issuer: config.issuer, audience: config.audience, jwks };
+  return jwks;
+}
+
+function extractBearer(headers: RawRequestDefaultExpression['headers']) {
+  const auth = headers.authorization;
+  if (typeof auth !== 'string') return undefined;
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  return match?.[1];
+}
+
+// Look for a string equal to `role` anywhere reasonable in the claims —
+// supports plain `roles: ['openpanel:admin']`, Zitadel's nested
+// `urn:zitadel:iam:org:project:roles: { 'openpanel:admin': {...} }`
+// shape, and `scope: 'openid openpanel:admin'`.
+function claimHasRole(payload: Record<string, unknown>, role: string): boolean {
+  const zitadelRoles = payload['urn:zitadel:iam:org:project:roles'];
+  if (zitadelRoles && typeof zitadelRoles === 'object') {
+    if (role in (zitadelRoles as Record<string, unknown>)) return true;
+  }
+  const roles = payload.roles;
+  if (Array.isArray(roles) && roles.includes(role)) return true;
+  const scope = payload.scope;
+  if (typeof scope === 'string' && scope.split(/\s+/).includes(role)) {
+    return true;
+  }
+  return false;
+}
+
+// Synthesizes a Client-shaped record from a verified admin JWT so
+// existing /manage controllers can pull `organizationId` off
+// `request.client` without branching on auth source. The synthesized
+// client is `type: 'root'`, `secret: null`, and is NEVER persisted —
+// it lives only for the lifetime of the request.
+function synthesizeAdminClient(
+  organizationId: string,
+  subject: string,
+): IServiceClientWithProject {
+  return {
+    id: `jwt:${subject}`,
+    name: `admin-jwt:${subject}`,
+    type: ClientType.root,
+    organizationId,
+    projectId: null,
+    secret: null,
+    ignoreCorsAndSecret: false,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    // Project relation isn't used by /manage routes (root clients
+    // scope at org level); satisfy the typing with null and rely on
+    // controllers' projectId-from-body/query path.
+    project: null as unknown as IServiceClientWithProject['project'],
+  };
+}
+
+export async function validateAdminJwtRequest(
+  headers: RawRequestDefaultExpression['headers'],
+): Promise<IServiceClientWithProject> {
+  const config = loadAdminOidcConfig();
+  if (!config) {
+    throw new Error('Admin OIDC auth is not configured');
+  }
+  const token = extractBearer(headers);
+  if (!token) {
+    throw new Error('Admin OIDC: Authorization header missing or malformed');
+  }
+
+  const jwks = await getJwks(config);
+  const verifyOptions: Parameters<typeof jwtVerify>[2] = {
+    issuer: config.issuer,
+  };
+  if (config.audience) {
+    verifyOptions.audience = config.audience;
+  }
+
+  const { payload } = await jwtVerify(token, jwks, verifyOptions);
+  const claims = payload as Record<string, unknown>;
+  const subject = typeof payload.sub === 'string' ? payload.sub : 'unknown';
+
+  // Platform-admin elevation: either path is sufficient on its own
+  // and bypasses the requiredRole check (the platform-admin signal
+  // is strictly stronger than the generic admin signal).
+  const isPlatformAdminByRole = claimHasRole(claims, config.platformAdminRole);
+  const isPlatformAdminByAudience =
+    typeof config.platformAdminAudience === 'string' &&
+    audienceHasPlatformAdmin(claims, config.platformAdminAudience);
+
+  if (isPlatformAdminByRole || isPlatformAdminByAudience) {
+    // Synthesize with the sentinel `organizationId='platform-admin'`.
+    // The manage controllers' `isPlatformAdmin` check bypasses
+    // tenant scoping on Org CRUD. We intentionally ignore the
+    // resource-owner claim here: a platform-admin ServiceUser may
+    // live in any IdP-side org — the role grant or audience-bound
+    // project, not the home org, is what authorizes cross-tenant
+    // management.
+    return synthesizeAdminClient(PLATFORM_ADMIN_ORG_ID, subject);
+  }
+
+  // Regular admin: must carry the configured requiredRole.
+  if (!claimHasRole(claims, config.requiredRole)) {
+    throw new Error(`Admin OIDC: token lacks required role ${config.requiredRole}`);
+  }
+
+  // Tenant-scoped admin: bind the synthesized client to the org
+  // claim. Same-org filters in the controllers apply.
+  const orgId = claims[config.orgClaim];
+  if (typeof orgId !== 'string' || orgId.length === 0) {
+    throw new Error(
+      `Admin OIDC: token missing organization claim "${config.orgClaim}"`,
+    );
+  }
+  return synthesizeAdminClient(orgId, subject);
+}
+
+/**
+ * Wrapper for /manage routes. Dispatches to JWT-bearer auth when
+ * `ADMIN_OIDC_ISSUER` is configured AND the request carries an
+ * `Authorization: Bearer …` header; otherwise falls back to the
+ * existing `openpanel-client-id` / `openpanel-client-secret` flow.
+ *
+ * Returns a Client-shaped record in both cases, so callers in
+ * controllers (`request.client!.organizationId`, etc.) work without
+ * branching.
+ */
+export async function validateAdminRequest(
+  headers: RawRequestDefaultExpression['headers'],
+): Promise<IServiceClientWithProject> {
+  const bearer = extractBearer(headers);
+  if (bearer && isAdminJwtAuthEnabled()) {
+    return validateAdminJwtRequest(headers);
+  }
+  return validateManageRequest(headers);
 }

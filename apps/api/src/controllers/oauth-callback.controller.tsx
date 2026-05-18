@@ -1,6 +1,7 @@
 import {
   Arctic,
   createSession,
+  decryptSsoSecret,
   generateSessionToken,
   github,
   google,
@@ -11,7 +12,12 @@ import {
   setLastAuthProviderCookie,
   setSessionTokenCookie,
 } from '@openpanel/auth';
-import { type Account, connectUserToOrganization, db } from '@openpanel/db';
+import {
+  type Account,
+  connectUserToOrganization,
+  db,
+  type OrganizationSsoConfig,
+} from '@openpanel/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { LogError } from '@/utils/errors';
@@ -43,7 +49,7 @@ async function getGithubEmail(githubAccessToken: string) {
 }
 
 // New types and interfaces
-type Provider = 'github' | 'google' | 'oidc';
+type Provider = 'github' | 'google' | 'oidc' | 'org-sso';
 interface OAuthUser {
   id: string;
   email: string;
@@ -94,11 +100,17 @@ async function handleNewUser({
   providerName,
   inviteId,
   reply,
+  jitMembership,
 }: {
   oauthUser: OAuthUser;
   providerName: Provider;
   inviteId: string | undefined | null;
   reply: FastifyReply;
+  // When set, the User is created with a Member row binding them to
+  // the given Organization at the configured role. Used by the
+  // org-sso flow so a fresh user landing through their tenant's IdP
+  // doesn't need a separate invite step.
+  jitMembership?: { organizationId: string; role: string };
 }) {
   const existingUser = await db.user.findFirst({
     where: { email: oauthUser.email },
@@ -126,6 +138,17 @@ async function handleNewUser({
           providerId: oauthUser.id,
         },
       },
+      ...(jitMembership
+        ? {
+            membership: {
+              create: {
+                organizationId: jitMembership.organizationId,
+                role: jitMembership.role,
+                email: oauthUser.email,
+              },
+            },
+          }
+        : {}),
     },
   });
 
@@ -409,26 +432,66 @@ export async function googleCallback(req: FastifyRequest, reply: FastifyReply) {
 
 export async function oidcCallback(req: FastifyRequest, reply: FastifyReply) {
   try {
-    if (!isOidcEnabled()) {
+    // Routing: the cookie set by tRPC's `signInOAuth` org-sso branch
+    // tells us this callback is for a per-org config (DB-backed)
+    // rather than the instance-level env-driven flow.
+    const ssoConfigId = req.cookies.oidc_sso_config_id;
+    let orgConfig: OrganizationSsoConfig | null = null;
+    if (ssoConfigId) {
+      orgConfig = await db.organizationSsoConfig.findUnique({
+        where: { id: ssoConfigId },
+      });
+      if (!orgConfig) {
+        throw new LogError(
+          'Org SSO config not found — was it deleted mid-flow?',
+        );
+      }
+    } else if (!isOidcEnabled()) {
       throw new LogError('OIDC is not configured on this instance');
     }
 
+    const providerLabel: Provider = orgConfig ? 'org-sso' : 'oidc';
     const { code } = await validateOAuthCallback(req, 'oidc');
     const inviteId = req.cookies.inviteId;
     const codeVerifier = req.cookies.oidc_code_verifier!;
-    const tokens = await oidc.validateAuthorizationCode(
-      OIDC_TOKEN_ENDPOINT,
-      code,
-      codeVerifier
-    );
+
+    let tokens: OAuth2Tokens;
+    if (orgConfig) {
+      if (!orgConfig.oidcClientId || !orgConfig.oidcClientSecretEncrypted || !orgConfig.oidcTokenEndpoint) {
+        throw new LogError('Org SSO config is incomplete', { ssoConfigId });
+      }
+      const clientSecret = decryptSsoSecret(
+        Buffer.from(orgConfig.oidcClientSecretEncrypted),
+      );
+      const redirectUri =
+        process.env.OIDC_REDIRECT_URI ||
+        `${process.env.API_URL ?? ''}/oauth/oidc/callback`;
+      const orgClient = new Arctic.OAuth2Client(
+        orgConfig.oidcClientId,
+        clientSecret,
+        redirectUri,
+      );
+      tokens = await orgClient.validateAuthorizationCode(
+        orgConfig.oidcTokenEndpoint,
+        code,
+        codeVerifier,
+      );
+    } else {
+      tokens = await oidc.validateAuthorizationCode(
+        OIDC_TOKEN_ENDPOINT,
+        code,
+        codeVerifier,
+      );
+    }
+
     const oidcUser = await fetchOidcUser(tokens);
     const existingAccount = await db.account.findFirst({
       where: {
         OR: [
-          { provider: 'oidc', providerId: oidcUser.id },
+          { provider: providerLabel, providerId: oidcUser.id },
           // Allow operators to migrate users by matching on email
           // when they flip to OIDC after initial signup.
-          { provider: 'oidc', providerId: null, email: oidcUser.email },
+          { provider: providerLabel, providerId: null, email: oidcUser.email },
           { provider: 'oauth', user: { email: oidcUser.email } },
         ],
       },
@@ -436,21 +499,48 @@ export async function oidcCallback(req: FastifyRequest, reply: FastifyReply) {
 
     reply.clearCookie('oidc_code_verifier');
     reply.clearCookie('oidc_oauth_state');
+    if (ssoConfigId) reply.clearCookie('oidc_sso_config_id');
 
     if (existingAccount) {
+      // Existing user, possibly not yet a member of the routing Org.
+      // Member has no compound unique on (userId, organizationId) in
+      // the current schema, so the idempotent-create is a find +
+      // conditional-create rather than an upsert.
+      if (orgConfig) {
+        const alreadyMember = await db.member.findFirst({
+          where: {
+            userId: existingAccount.userId,
+            organizationId: orgConfig.organizationId,
+          },
+          select: { id: true },
+        });
+        if (!alreadyMember) {
+          await db.member.create({
+            data: {
+              userId: existingAccount.userId,
+              organizationId: orgConfig.organizationId,
+              email: oidcUser.email,
+              role: 'member',
+            },
+          });
+        }
+      }
       return await handleExistingUser({
         account: existingAccount,
         oauthUser: oidcUser,
-        providerName: 'oidc',
+        providerName: providerLabel,
         reply,
       });
     }
 
     return await handleNewUser({
       oauthUser: oidcUser,
-      providerName: 'oidc',
+      providerName: providerLabel,
       inviteId,
       reply,
+      jitMembership: orgConfig
+        ? { organizationId: orgConfig.organizationId, role: 'member' }
+        : undefined,
     });
   } catch (error) {
     req.log.error(error);

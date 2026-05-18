@@ -13,6 +13,7 @@ import {
   zUpdateOrganization,
   zUpdateProject,
   zUpdateReference,
+  zUpsertOrgSsoConfig,
 } from '@/controllers/manage.controller';
 import { validateAdminRequest } from '@/utils/auth';
 import { activateRateLimiter } from '@/utils/rate-limiter';
@@ -100,6 +101,39 @@ const manageRouter: FastifyPluginAsyncZodOpenApi = async (fastify) => {
     url: '/organizations/:id',
     schema: { params: idParam, tags: ['Manage'], description: 'Delete an organization and cascade its projects, clients, and members.' },
     handler: controller.deleteOrganization,
+  });
+
+  // Per-organization SSO config (1:1 nested under Organization).
+  fastify.route({
+    method: 'GET',
+    url: '/organizations/:id/sso',
+    schema: {
+      params: idParam,
+      tags: ['Manage'],
+      description: "Get the organization's SSO config. Returns 404 when not set. The encrypted client_secret is never returned — `hasOidcClientSecret: boolean` reports presence.",
+    },
+    handler: controller.getOrgSsoConfig,
+  });
+  fastify.route({
+    method: 'PUT',
+    url: '/organizations/:id/sso',
+    schema: {
+      params: idParam,
+      body: zUpsertOrgSsoConfig,
+      tags: ['Manage'],
+      description: "Create or update the organization's SSO config. `oidcClientSecret` is required on first create and optional on update (omit to keep the existing value). Plaintext crosses TLS once, never returned on read.",
+    },
+    handler: controller.upsertOrgSsoConfig,
+  });
+  fastify.route({
+    method: 'DELETE',
+    url: '/organizations/:id/sso',
+    schema: {
+      params: idParam,
+      tags: ['Manage'],
+      description: "Remove the organization's SSO config. Idempotent — returns success even if no config exists.",
+    },
+    handler: controller.deleteOrgSsoConfig,
   });
 
   // Projects routes

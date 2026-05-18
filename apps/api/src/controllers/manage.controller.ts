@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { encryptSsoSecret, isSsoCryptoConfigured } from '@openpanel/auth';
 import { slug, stripTrailingSlash } from '@openpanel/common';
 import { hashPassword } from '@openpanel/common/server';
 import {
@@ -6,6 +7,7 @@ import {
   getClientByIdCached,
   getId,
   getProjectByIdCached,
+  type OrganizationSsoConfig,
 } from '@openpanel/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -447,6 +449,188 @@ export async function deleteOrganization(
 
   await db.organization.delete({
     where: { id: request.params.id },
+  });
+  reply.send({ success: true });
+}
+
+// ---------------------------------------------------------------------
+// Organization SSO config (per-org OIDC).
+//
+// Routes are nested under /manage/organizations/:id/sso since the
+// config is 1:1 with the parent Organization. Authorization mirrors
+// the rest of the Org handlers — same-org scoping for tenant-scoped
+// callers; platform-admin can reach any Org.
+//
+// Cleartext client_secret is accepted on write, encrypted at rest
+// with SSO_CONFIG_ENCRYPTION_KEY (AES-256-GCM), and NEVER returned
+// on read — the response shape uses `hasOidcClientSecret: boolean`
+// so clients can render "secret is set" without leaking the value.
+// ---------------------------------------------------------------------
+
+const zUrl = z.string().url();
+const zSsoDomain = z
+  .string()
+  .min(3)
+  .max(253)
+  .regex(
+    /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i,
+    'must be a bare DNS domain (no scheme, no path)',
+  )
+  .transform((s) => s.toLowerCase());
+
+export const zUpsertOrgSsoConfig = z.object({
+  provider: z.literal('OIDC').default('OIDC'),
+  displayName: z.string().min(1).max(120).optional(),
+  oidcClientId: z.string().min(1).optional(),
+  // Optional on update: omit to keep the existing secret. Required
+  // when creating from-scratch — enforced at handler time so the
+  // error message can point at the gap.
+  oidcClientSecret: z.string().min(1).optional(),
+  oidcAuthorizationEndpoint: zUrl.optional(),
+  oidcTokenEndpoint: zUrl.optional(),
+  oidcJwksUri: zUrl.optional(),
+  enforcedForDomains: z.array(zSsoDomain).optional(),
+  isRequired: z.boolean().optional(),
+});
+
+// Strip the encrypted blob from anything we send over the wire and
+// replace with a boolean indicator. Drops the unused organizationId
+// from the response too since it's already in the URL.
+function publicSsoShape(c: OrganizationSsoConfig) {
+  const { oidcClientSecretEncrypted, ...rest } = c;
+  return {
+    ...rest,
+    hasOidcClientSecret: !!oidcClientSecretEncrypted,
+  };
+}
+
+function requireOrgScope(request: FastifyRequest<{ Params: { id: string } }>) {
+  if (
+    !isPlatformAdmin(request.client!) &&
+    request.params.id !== request.client!.organizationId
+  ) {
+    throw new HttpError('Organization not found', { status: 404 });
+  }
+}
+
+export async function getOrgSsoConfig(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply,
+) {
+  requireOrgScope(request);
+  const config = await db.organizationSsoConfig.findUnique({
+    where: { organizationId: request.params.id },
+  });
+  if (!config) {
+    throw new HttpError('SSO config not set for this Organization', {
+      status: 404,
+    });
+  }
+  reply.send({ data: publicSsoShape(config) });
+}
+
+export async function upsertOrgSsoConfig(
+  request: FastifyRequest<{
+    Params: { id: string };
+    Body: z.infer<typeof zUpsertOrgSsoConfig>;
+  }>,
+  reply: FastifyReply,
+) {
+  requireOrgScope(request);
+
+  if (!isSsoCryptoConfigured()) {
+    throw new HttpError(
+      'SSO_CONFIG_ENCRYPTION_KEY is not set on the api pod. The operator must configure it before saving an SSO config.',
+      { status: 503 },
+    );
+  }
+
+  // Confirm the Org exists before we try to attach a config to it.
+  // Without this we'd 500 with a Prisma FK violation on first save.
+  const org = await db.organization.findUnique({
+    where: { id: request.params.id },
+    select: { id: true },
+  });
+  if (!org) {
+    throw new HttpError('Organization not found', { status: 404 });
+  }
+
+  const existing = await db.organizationSsoConfig.findUnique({
+    where: { organizationId: request.params.id },
+  });
+
+  if (!existing) {
+    // First-time create requires the full record. Optional fields
+    // get sensible defaults so a typical OIDC bringup needs only
+    // the four required values.
+    const body = request.body;
+    if (!body.oidcClientId || !body.oidcClientSecret || !body.oidcAuthorizationEndpoint || !body.oidcTokenEndpoint) {
+      throw new HttpError(
+        'oidcClientId, oidcClientSecret, oidcAuthorizationEndpoint, and oidcTokenEndpoint are required when creating an SSO config',
+        { status: 400 },
+      );
+    }
+    const created = await db.organizationSsoConfig.create({
+      data: {
+        organizationId: request.params.id,
+        provider: body.provider,
+        displayName: body.displayName ?? 'Single Sign-On',
+        oidcClientId: body.oidcClientId,
+        oidcClientSecretEncrypted: encryptSsoSecret(body.oidcClientSecret),
+        oidcAuthorizationEndpoint: body.oidcAuthorizationEndpoint,
+        oidcTokenEndpoint: body.oidcTokenEndpoint,
+        oidcJwksUri: body.oidcJwksUri ?? null,
+        enforcedForDomains: body.enforcedForDomains ?? [],
+        isRequired: body.isRequired ?? false,
+      },
+    });
+    reply.send({ data: publicSsoShape(created) });
+    return;
+  }
+
+  // Update path: every field is optional. Omit `oidcClientSecret`
+  // to leave the existing encrypted blob in place.
+  const body = request.body;
+  const data: Parameters<typeof db.organizationSsoConfig.update>[0]['data'] = {};
+  if (body.displayName !== undefined) data.displayName = body.displayName;
+  if (body.oidcClientId !== undefined) data.oidcClientId = body.oidcClientId;
+  if (body.oidcClientSecret !== undefined) {
+    data.oidcClientSecretEncrypted = encryptSsoSecret(body.oidcClientSecret);
+  }
+  if (body.oidcAuthorizationEndpoint !== undefined) {
+    data.oidcAuthorizationEndpoint = body.oidcAuthorizationEndpoint;
+  }
+  if (body.oidcTokenEndpoint !== undefined) {
+    data.oidcTokenEndpoint = body.oidcTokenEndpoint;
+  }
+  if (body.oidcJwksUri !== undefined) data.oidcJwksUri = body.oidcJwksUri;
+  if (body.enforcedForDomains !== undefined) {
+    data.enforcedForDomains = body.enforcedForDomains;
+  }
+  if (body.isRequired !== undefined) data.isRequired = body.isRequired;
+
+  const updated = await db.organizationSsoConfig.update({
+    where: { organizationId: request.params.id },
+    data,
+  });
+  reply.send({ data: publicSsoShape(updated) });
+}
+
+export async function deleteOrgSsoConfig(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply,
+) {
+  requireOrgScope(request);
+  const existing = await db.organizationSsoConfig.findUnique({
+    where: { organizationId: request.params.id },
+  });
+  if (!existing) {
+    // Idempotent delete: 204-style success even when nothing was there.
+    reply.send({ success: true });
+    return;
+  }
+  await db.organizationSsoConfig.delete({
+    where: { organizationId: request.params.id },
   });
   reply.send({ success: true });
 }

@@ -16,6 +16,7 @@ import {
   invalidateSession,
   decryptSsoSecret,
   isOidcEnabled,
+  isSsoRequiredForUser,
   lookupOrgSsoByEmailDomain,
   oidc,
   OIDC_AUTHORIZATION_ENDPOINT,
@@ -318,6 +319,18 @@ export const authRouter = createTRPCRouter({
 
       if (!user) {
         throw TRPCNotFoundError('User does not exists');
+      }
+
+      // Block email/password sign-in for users whose Organization
+      // mandates SSO. The dashboard catches this code and renders a
+      // "your organization requires SSO" page that kicks off the
+      // org-sso flow against the same email. We return the matching
+      // config's id+displayName so the UI can label the button.
+      const ssoRequired = await isSsoRequiredForUser(user.id);
+      if (ssoRequired) {
+        throw TRPCAccessError(
+          `Sign in via ${ssoRequired.displayName} — your organization requires single sign-on.`,
+        );
       }
 
       if (provider === 'email') {

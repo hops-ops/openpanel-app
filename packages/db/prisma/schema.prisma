@@ -82,6 +82,7 @@ model Organization {
   integrations    Integration[]
   invites         Invite[]
   conversations   Conversation[]
+  ssoConfig       OrganizationSsoConfig?
   timezone        String?
   onboarding      String?          @default("completed")
 
@@ -708,4 +709,57 @@ model EmailUnsubscribe {
 
   @@unique([email, category])
   @@map("email_unsubscribes")
+}
+
+// ---------------------------------------------------------------------------
+// Per-organization SSO
+//
+// One row per Organization that has SSO configured. The client_secret is
+// encrypted at rest with `SSO_CONFIG_ENCRYPTION_KEY` (AES-256-GCM); the
+// plaintext never leaves the api process. See spec
+// specs/openpanel-sso-instance-and-per-org for the routing + enforcement
+// model and how this coexists with the instance-level env-driven OIDC
+// flow.
+//
+// 1:1 with Organization for v1 (`@unique` on organizationId). Promote to
+// 1:N if multiple IdPs per Org becomes a real ask.
+// ---------------------------------------------------------------------------
+
+enum SsoProvider {
+  OIDC
+  // SAML // reserved; not implemented in v1
+
+  @@map("sso_provider")
+}
+
+model OrganizationSsoConfig {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  provider    SsoProvider @default(OIDC)
+  displayName String      @default("Single Sign-On")
+
+  // OIDC fields. Nullable so the row can later represent a non-OIDC
+  // provider without a join table.
+  oidcClientId              String?
+  oidcClientSecretEncrypted Bytes?
+  oidcAuthorizationEndpoint String?
+  oidcTokenEndpoint         String?
+  oidcJwksUri               String?
+
+  // Routing + enforcement
+  //
+  // `enforcedForDomains` is the list of email domains routed to this
+  // Org's SSO at /login. `isRequired` blocks email/password sign-in for
+  // existing Org members (they get "your organization requires SSO").
+  enforcedForDomains String[] @default([])
+  isRequired         Boolean  @default(false)
+
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  @@index([enforcedForDomains], type: Gin)
+  @@map("organization_sso_configs")
 }

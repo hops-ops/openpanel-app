@@ -447,6 +447,39 @@ export async function deleteOrganization(
     throw new HttpError('Organization not found', { status: 404 });
   }
 
+  let cacheClearTasks: Promise<unknown>[] = [];
+  try {
+    const [projects, clients] = await Promise.all([
+      db.project.findMany({
+        where: { organizationId: request.params.id },
+        select: { id: true },
+      }),
+      db.client.findMany({
+        where: { organizationId: request.params.id },
+        select: { id: true },
+      }),
+    ]);
+    cacheClearTasks = [
+      ...projects.map((project) => getProjectByIdCached.clear(project.id)),
+      ...clients.map((client) => getClientByIdCached.clear(client.id)),
+    ];
+  } catch (err) {
+    request.log.error(
+      { err, organizationId: request.params.id },
+      'Failed to load descendant resources for organization cache invalidation',
+    );
+  }
+
+  const cacheClearResults = await Promise.allSettled(cacheClearTasks);
+  for (const result of cacheClearResults) {
+    if (result.status === 'rejected') {
+      request.log.error(
+        { err: result.reason, organizationId: request.params.id },
+        'Failed to clear descendant cache before organization deletion',
+      );
+    }
+  }
+
   await db.organization.delete({
     where: { id: request.params.id },
   });

@@ -9,6 +9,7 @@ import { handleError, useTRPC } from '@/integrations/trpc/react';
 import { PAGE_TITLES, createOrganizationTitle } from '@/utils/title';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
+import { useEffect } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 
@@ -165,6 +166,19 @@ function SsoForm({
       isRequired: config?.isRequired ?? false,
     },
   });
+
+  useEffect(() => {
+    reset({
+      displayName: config?.displayName ?? 'Single Sign-On',
+      oidcClientId: config?.oidcClientId ?? '',
+      oidcClientSecret: '',
+      oidcAuthorizationEndpoint: config?.oidcAuthorizationEndpoint ?? '',
+      oidcTokenEndpoint: config?.oidcTokenEndpoint ?? '',
+      oidcJwksUri: config?.oidcJwksUri ?? '',
+      enforcedForDomains: config?.enforcedForDomains ?? [],
+      isRequired: config?.isRequired ?? false,
+    });
+  }, [config, reset]);
 
   const mutation = useMutation(
     trpc.organizationSso.upsert.mutationOptions({

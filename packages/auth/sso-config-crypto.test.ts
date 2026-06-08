@@ -36,9 +36,16 @@ describe('sso-config-crypto', () => {
     const secret = 'sec_oidc_topsecret_!@#$%^&*()';
     const blob = encryptSsoSecret(secret);
     expect(blob).toBeInstanceOf(Buffer);
-    // 12-byte iv + ciphertext + 16-byte authTag = at least IV+TAG+1 byte
-    expect(blob.length).toBeGreaterThanOrEqual(12 + 16 + 1);
+    // 12-byte iv + ciphertext + 16-byte authTag = at least IV+TAG bytes
+    expect(blob.length).toBeGreaterThanOrEqual(12 + 16);
     expect(decryptSsoSecret(blob)).toBe(secret);
+  });
+
+  it('round-trips an empty secret payload', () => {
+    process.env.SSO_CONFIG_ENCRYPTION_KEY = randomKeyB64();
+    const blob = encryptSsoSecret('');
+    expect(blob.length).toBe(12 + 16);
+    expect(decryptSsoSecret(blob)).toBe('');
   });
 
   it('produces a different ciphertext on each call (fresh IV)', () => {

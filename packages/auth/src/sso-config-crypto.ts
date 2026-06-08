@@ -77,10 +77,10 @@ export function encryptSsoSecret(plaintext: string): Buffer {
  * a tamper as an empty secret.
  */
 export function decryptSsoSecret(blob: Buffer): string {
-  if (blob.length < IV_LEN + TAG_LEN + 1) {
+  if (blob.length < IV_LEN + TAG_LEN) {
     throw new Error(
       `decryptSsoSecret: truncated payload (got ${blob.length} bytes; need at least ${
-        IV_LEN + TAG_LEN + 1
+        IV_LEN + TAG_LEN
       })`,
     );
   }

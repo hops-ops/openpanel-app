@@ -61,12 +61,21 @@ export async function lookupOrgSsoByEmailDomain(
   const domain = emailDomain(email);
   if (!domain) return null;
 
-  const config = await db.organizationSsoConfig.findFirst({
-    where: {
-      enforcedForDomains: { has: domain },
-    },
-    include: { organization: true },
-  });
+  let config: (OrganizationSsoConfig & { organization: Organization }) | null;
+  try {
+    config = await db.organizationSsoConfig.findFirst({
+      where: {
+        enforcedForDomains: { has: domain },
+      },
+      include: { organization: true },
+    });
+  } catch (err) {
+    console.error('lookupOrgSsoByEmailDomain: SSO config lookup failed', {
+      domain,
+      err,
+    });
+    return null;
+  }
 
   if (!config) return null;
   const { organization, ...rest } = config;

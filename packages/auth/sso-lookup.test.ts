@@ -51,6 +51,22 @@ describe('lookupOrgSsoByEmailDomain', () => {
     expect(findFirst).not.toHaveBeenCalled();
   });
 
+  it('returns null when the SSO config lookup fails', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    findFirst.mockRejectedValueOnce(new Error('db unavailable'));
+
+    const result = await lookupOrgSsoByEmailDomain('pat@example.com');
+
+    expect(result).toBeNull();
+    expect(consoleError).toHaveBeenCalledWith(
+      'lookupOrgSsoByEmailDomain: SSO config lookup failed',
+      expect.objectContaining({ domain: 'example.com' }),
+    );
+    consoleError.mockRestore();
+  });
+
   it('separates the included organization from the config row', async () => {
     findFirst.mockResolvedValueOnce({
       id: 'cfg-1',

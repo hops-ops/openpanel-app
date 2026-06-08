@@ -23,6 +23,7 @@ describe('emailDomain', () => {
     expect(emailDomain('pat@')).toBeNull();
     expect(emailDomain('pat@no-tld')).toBeNull();
     expect(emailDomain('pat @example.com')).toBeNull();
+    expect(emailDomain('pat@example@corp.com')).toBeNull();
     // @ts-expect-error testing the non-string path
     expect(emailDomain(undefined)).toBeNull();
   });

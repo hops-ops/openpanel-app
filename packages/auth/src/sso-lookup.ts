@@ -37,7 +37,9 @@ export function emailDomain(email: string): string | null {
   // No internal whitespace anywhere (`pat @example.com` is malformed
   // even though split('@')[1] would otherwise pass).
   if (/\s/.test(trimmed)) return null;
+  const firstAt = trimmed.indexOf('@');
   const atIdx = trimmed.lastIndexOf('@');
+  if (firstAt !== atIdx) return null;
   if (atIdx <= 0 || atIdx === trimmed.length - 1) return null;
   const domain = trimmed.slice(atIdx + 1);
   // Cheap sanity check — at least one dot.

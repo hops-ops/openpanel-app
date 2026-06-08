@@ -525,32 +525,24 @@ export async function oidcCallback(req: FastifyRequest, reply: FastifyReply) {
 
     if (existingAccount) {
       // Existing user, possibly not yet a member of the routing Org.
-      // Member has no compound unique on (userId, organizationId) in
-      // the current schema, so the idempotent-create is a find +
-      // conditional-create rather than an upsert.
       if (orgConfig) {
-        const alreadyMember = await db.member.findFirst({
-          where: {
-            userId: existingAccount.userId,
-            organizationId: orgConfig.organizationId,
-          },
-          select: { id: true },
-        });
-        if (!alreadyMember) {
-          await db.member.create({
-            data: {
-              userId: existingAccount.userId,
+        await db.member.createMany({
+          data: [
+            {
               organizationId: orgConfig.organizationId,
+              userId: existingAccount.userId,
               email: oidcUser.email,
               role: 'member',
             },
-          });
-        }
+          ],
+          skipDuplicates: true,
+        });
       }
       return await handleExistingUser({
         account: existingAccount,
         oauthUser: oidcUser,
         providerName: providerLabel,
+        inviteId,
         reply,
       });
     }
@@ -561,7 +553,10 @@ export async function oidcCallback(req: FastifyRequest, reply: FastifyReply) {
       inviteId,
       reply,
       jitMembership: orgConfig
-        ? { organizationId: orgConfig.organizationId, role: 'member' }
+        ? {
+            organizationId: orgConfig.organizationId,
+            role: 'member',
+          }
         : undefined,
     });
   } catch (error) {

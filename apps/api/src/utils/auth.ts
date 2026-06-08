@@ -390,10 +390,10 @@ async function getJwks(config: AdminOidcConfig) {
   ) {
     return jwksCache.jwks;
   }
-  const discoveryUrl = new URL(
-    '/.well-known/openid-configuration',
-    config.issuer,
-  );
+  const issuerUrl = config.issuer.endsWith('/')
+    ? config.issuer
+    : `${config.issuer}/`;
+  const discoveryUrl = new URL('.well-known/openid-configuration', issuerUrl);
   const discoveryRes = await fetch(discoveryUrl);
   if (!discoveryRes.ok) {
     throw new Error(

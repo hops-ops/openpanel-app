@@ -15,6 +15,7 @@ import { integrationRouter } from './routers/integration';
 import { notificationRouter } from './routers/notification';
 import { onboardingRouter } from './routers/onboarding';
 import { organizationRouter } from './routers/organization';
+import { organizationSsoRouter } from './routers/organization-sso';
 import { overviewRouter } from './routers/overview';
 import { profileRouter } from './routers/profile';
 import { projectRouter } from './routers/project';
@@ -37,6 +38,7 @@ export const appRouter = createTRPCRouter({
   report: reportRouter,
   dashboard: dashboardRouter,
   organization: organizationRouter,
+  organizationSso: organizationSsoRouter,
   user: userRouter,
   project: projectRouter,
   client: clientRouter,

@@ -52,8 +52,45 @@ function Component() {
     return <FullPageLoadingState />;
   }
 
+  if (cfgQuery.isError || statusQuery.isError) {
+    return (
+      <div className="container p-8">
+        <PageHeader
+          title="Single Sign-On"
+          description="Configure an OIDC identity provider for everyone in this organization."
+          className="mb-8"
+        />
+        <Widget>
+          <WidgetHead>
+            <span className="title">Could not load SSO settings</span>
+          </WidgetHead>
+          <WidgetBody>
+            <p className="text-sm text-muted-foreground">
+              Refresh the SSO settings requests before editing this
+              configuration.
+            </p>
+            <Button
+              className="self-start"
+              disabled={cfgQuery.isFetching || statusQuery.isFetching}
+              onClick={() => {
+                cfgQuery.refetch();
+                statusQuery.refetch();
+              }}
+              size="sm"
+              type="button"
+            >
+              Retry
+            </Button>
+          </WidgetBody>
+        </Widget>
+      </div>
+    );
+  }
+
   const config = cfgQuery.data ?? null;
-  const cryptoConfigured = statusQuery.data?.cryptoConfigured ?? false;
+  const cryptoConfigured = statusQuery.isSuccess
+    ? statusQuery.data.cryptoConfigured
+    : false;
 
   return (
     <div className="container p-8">

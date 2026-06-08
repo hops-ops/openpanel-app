@@ -26,10 +26,21 @@ const KEY_LEN = 32;
 const IV_LEN = 12;
 const TAG_LEN = 16;
 
+function decodeBase64Key(raw: string, envVar: string): Buffer {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw) || raw.length % 4 !== 0) {
+    throw new Error(`${envVar}: expected a valid base64-encoded key`);
+  }
+  const buf = Buffer.from(raw, 'base64');
+  if (buf.toString('base64') !== raw) {
+    throw new Error(`${envVar}: expected a valid base64-encoded key`);
+  }
+  return buf;
+}
+
 function loadKeyFromEnv(envVar: string): Buffer | null {
   const raw = process.env[envVar];
   if (!raw) return null;
-  const buf = Buffer.from(raw, 'base64');
+  const buf = decodeBase64Key(raw, envVar);
   if (buf.length !== KEY_LEN) {
     throw new Error(
       `${envVar}: expected ${KEY_LEN}-byte key (base64-encoded); got ${buf.length} bytes`,
@@ -119,5 +130,9 @@ export function decryptSsoSecret(blob: Buffer): string {
  * read.
  */
 export function isSsoCryptoConfigured(): boolean {
-  return !!process.env.SSO_CONFIG_ENCRYPTION_KEY;
+  try {
+    return loadKeyFromEnv('SSO_CONFIG_ENCRYPTION_KEY') !== null;
+  } catch {
+    return false;
+  }
 }

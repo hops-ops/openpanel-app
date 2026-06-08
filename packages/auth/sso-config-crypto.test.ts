@@ -31,6 +31,15 @@ describe('sso-config-crypto', () => {
     expect(isSsoCryptoConfigured()).toBe(true);
   });
 
+  it('isSsoCryptoConfigured returns false for malformed keys', () => {
+    process.env.SSO_CONFIG_ENCRYPTION_KEY = 'not base64!!!!';
+    expect(isSsoCryptoConfigured()).toBe(false);
+
+    process.env.SSO_CONFIG_ENCRYPTION_KEY =
+      Buffer.from('too-short').toString('base64');
+    expect(isSsoCryptoConfigured()).toBe(false);
+  });
+
   it('round-trips a secret', () => {
     process.env.SSO_CONFIG_ENCRYPTION_KEY = randomKeyB64();
     const secret = 'sec_oidc_topsecret_!@#$%^&*()';

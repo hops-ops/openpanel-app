@@ -303,6 +303,7 @@ export async function validateManageRequest(
 
 const DEFAULT_REQUIRED_ROLE = 'openpanel:admin';
 const DEFAULT_PLATFORM_ADMIN_ROLE = 'openpanel:platform-admin';
+const ADMIN_OIDC_DISCOVERY_TIMEOUT_MS = 5000;
 
 // Sentinel `organizationId` the manage controllers recognize as
 // platform-admin. Kept in lock-step with `PLATFORM_ADMIN_ORG_ID` in
@@ -394,7 +395,19 @@ async function getJwks(config: AdminOidcConfig) {
     ? config.issuer
     : `${config.issuer}/`;
   const discoveryUrl = new URL('.well-known/openid-configuration', issuerUrl);
-  const discoveryRes = await fetch(discoveryUrl);
+  let discoveryRes: Response;
+  try {
+    discoveryRes = await fetch(discoveryUrl, {
+      signal: AbortSignal.timeout(ADMIN_OIDC_DISCOVERY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new Error(
+        `Admin OIDC: discovery fetch timed out after ${ADMIN_OIDC_DISCOVERY_TIMEOUT_MS}ms for ${discoveryUrl}`,
+      );
+    }
+    throw err;
+  }
   if (!discoveryRes.ok) {
     throw new Error(
       `Admin OIDC: discovery fetch failed (${discoveryRes.status}) for ${discoveryUrl}`,
